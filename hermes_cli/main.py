@@ -1034,29 +1034,9 @@ def select_provider_and_model(args=None):
     if active == "openrouter" and get_env_value("OPENAI_BASE_URL"):
         active = "custom"
 
-    provider_labels = {
-        "openrouter": "OpenRouter",
-        "nous": "Nous Portal",
-        "openai-codex": "OpenAI Codex",
-        "qwen-oauth": "Qwen OAuth",
-        "copilot-acp": "GitHub Copilot ACP",
-        "copilot": "GitHub Copilot",
-        "anthropic": "Anthropic",
-        "gemini": "Google AI Studio",
-        "zai": "Z.AI / GLM",
-        "kimi-coding": "Kimi / Moonshot",
-        "kimi-coding-cn": "Kimi / Moonshot (China)",
-        "minimax": "MiniMax",
-        "minimax-cn": "MiniMax (China)",
-        "opencode-zen": "OpenCode Zen",
-        "opencode-go": "OpenCode Go",
-        "ai-gateway": "AI Gateway",
-        "kilocode": "Kilo Code",
-        "alibaba": "Alibaba Cloud (DashScope)",
-        "huggingface": "Hugging Face",
-        "xiaomi": "Xiaomi MiMo",
-        "custom": "Custom endpoint",
-    }
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS
+
+    provider_labels = dict(_PROVIDER_LABELS)  # derive from canonical list
     active_label = provider_labels.get(active, active) if active else "none"
 
     print()
@@ -1065,31 +1045,9 @@ def select_provider_and_model(args=None):
     print()
 
     # Step 1: Provider selection — top providers shown first, rest behind "More..."
-    top_providers = [
-        ("nous", "Nous Portal (Nous Research subscription)"),
-        ("openrouter", "OpenRouter (100+ models, pay-per-use)"),
-        ("anthropic", "Anthropic (Claude models — API key or Claude Code)"),
-        ("openai-codex", "OpenAI Codex"),
-        ("qwen-oauth", "Qwen OAuth (reuses local Qwen CLI login)"),
-        ("copilot", "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
-        ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
-    ]
-
-    extended_providers = [
-        ("copilot-acp", "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
-        ("gemini", "Google AI Studio (Gemini models — OpenAI-compatible endpoint)"),
-        ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
-        ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
-        ("kimi-coding-cn", "Kimi / Moonshot China (Moonshot CN direct API)"),
-        ("minimax", "MiniMax (global direct API)"),
-        ("minimax-cn", "MiniMax China (domestic direct API)"),
-        ("kilocode", "Kilo Code (Kilo Gateway API)"),
-        ("opencode-zen", "OpenCode Zen (35+ curated models, pay-as-you-go)"),
-        ("opencode-go", "OpenCode Go (open models, $10/month subscription)"),
-        ("ai-gateway", "AI Gateway (Vercel — 200+ models, pay-per-use)"),
-        ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
-        ("xiaomi", "Xiaomi MiMo (MiMo-V2 models — pro, omni, flash)"),
-    ]
+    # Derived from CANONICAL_PROVIDERS (single source of truth)
+    top_providers = [(p.slug, p.tui_desc) for p in CANONICAL_PROVIDERS if p.tier == "top"]
+    extended_providers = [(p.slug, p.tui_desc) for p in CANONICAL_PROVIDERS if p.tier == "extended"]
 
     def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
         custom_provider_map = {}
@@ -1207,7 +1165,9 @@ def select_provider_and_model(args=None):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
-    elif selected_provider in ("gemini", "zai", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi"):
+    elif selected_provider == "arcee":
+        _model_flow_arcee(config, current_model)
+    elif selected_provider in ("gemini", "deepseek", "xai", "zai", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
@@ -2476,6 +2436,135 @@ def _model_flow_kimi(config, current_model=""):
         print(f"Default model set to: {selected} (via {endpoint_label})")
     else:
         print("No change.")
+
+
+def _model_flow_arcee(config, current_model=""):
+    """Arcee AI model selection — two auth paths under a single provider ID.
+
+    Either an Arcee direct key (ARCEEAI_API_KEY) or an OpenRouter key
+    (OPENROUTER_API_KEY) works. Runtime auto-detects the endpoint based
+    on which key is present (direct wins) or by sk-or- key prefix.
+    """
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY, _prompt_model_selection, _save_model_choice,
+        ARCEE_DIRECT_BASE_URL, ARCEE_OPENROUTER_BASE_URL,
+    )
+    from hermes_cli.config import (
+        get_env_value, save_env_value, remove_env_value, load_config, save_config,
+    )
+
+    provider_id = "arcee"
+    pconfig = PROVIDER_REGISTRY[provider_id]
+
+    existing_direct = get_env_value("ARCEEAI_API_KEY") or os.getenv("ARCEEAI_API_KEY", "")
+    existing_or = get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+
+    has_creds = bool(existing_direct) or bool(existing_or)
+    needs_auth = not has_creds
+
+    if has_creds:
+        if existing_direct:
+            print(f"  Arcee AI direct key: {existing_direct[:8]}... ✓ → {ARCEE_DIRECT_BASE_URL}")
+        else:
+            print(f"  OpenRouter key: {existing_or[:8]}... ✓ → {ARCEE_OPENROUTER_BASE_URL}")
+        print()
+        print("    1. Use existing credentials")
+        print("    2. Reconfigure (enter a new key)")
+        print("    3. Cancel")
+        print()
+        try:
+            choice = input("  Choice [1/2/3]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            choice = "1"
+        if choice == "3":
+            return
+        if choice == "2":
+            # Clear the direct key so a newly-entered OpenRouter key isn't shadowed
+            # at runtime (direct wins). Leave OPENROUTER_API_KEY alone — it's shared
+            # with the OpenRouter provider itself.
+            if existing_direct:
+                remove_env_value("ARCEEAI_API_KEY")
+            needs_auth = True
+        print()
+
+    credentials_updated = False
+    if needs_auth:
+        print("  Choose authentication method:")
+        print()
+        print("    1. Arcee AI API key (direct — chat.arcee.ai)")
+        print("    2. OpenRouter API key (routes via openrouter.ai)")
+        print("    3. Cancel")
+        print()
+        try:
+            choice = input("  Choice [1/2/3]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+
+        if choice == "1":
+            print()
+            print("  Get an Arcee API key at: https://chat.arcee.ai/")
+            print()
+            try:
+                import getpass
+                new_key = getpass.getpass("  ARCEEAI_API_KEY (or Enter to cancel): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+            if not new_key:
+                print("  Cancelled.")
+                return
+            save_env_value("ARCEEAI_API_KEY", new_key)
+            print("  ✓ Saved to ARCEEAI_API_KEY.")
+            credentials_updated = True
+        elif choice == "2":
+            print()
+            print("  Get an OpenRouter key at: https://openrouter.ai/keys")
+            print()
+            try:
+                import getpass
+                new_key = getpass.getpass("  OPENROUTER_API_KEY (or Enter to cancel): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                return
+            if not new_key:
+                print("  Cancelled.")
+                return
+            save_env_value("OPENROUTER_API_KEY", new_key)
+            print("  ✓ Saved to OPENROUTER_API_KEY.")
+            credentials_updated = True
+        else:
+            print("  No change.")
+            return
+        print()
+
+    # Model selection
+    model_list = _PROVIDER_MODELS.get("arcee", [])
+    if model_list:
+        selected = _prompt_model_selection(model_list, current_model=current_model)
+    else:
+        try:
+            selected = input("Enter model name: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            selected = None
+
+    if selected:
+        _save_model_choice(selected)
+
+    # Point the config at the arcee provider whenever we saved new credentials
+    # or switched models. Strip any inline base_url / api_key left over from a
+    # previous "custom endpoint" onboarding — those would shadow the env-var
+    # credentials at runtime and keep hermes on the stale custom-provider path.
+    if credentials_updated or selected:
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = "arcee"
+        model.pop("base_url", None)
+        model.pop("api_key", None)
+        save_config(cfg)
 
 
 def _model_flow_api_key_provider(config, provider_id, current_model=""):
@@ -4628,7 +4717,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "xiaomi"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "xiaomi", "arcee"],
         default=None,
         help="Inference provider (default: auto)"
     )
